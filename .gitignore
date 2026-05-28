@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Node
+src/frontend/culinary-bridge/node_modules/
+src/frontend/culinary-bridge/build/
+
+# OS
+.DS_Store
+Thumbs.db
