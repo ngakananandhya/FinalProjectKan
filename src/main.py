@@ -1080,11 +1080,14 @@ def recommend(recipe_name, target_region="Jakarta", top_n=5, api_mode=False):
             target_region = matched
         elif action == 'suggest':
             if api_mode:
-                # API mode: tolak suggest, hanya accept match (≥80%)
-                print(f"\nRegion '{target_region}' tidak tersedia.")
-                print(f"   Wilayah terdekat: {matched} (kemiripan {score:.0f}%) — terlalu rendah untuk auto-match.")
-                print(f"   Gunakan nama wilayah yang lebih spesifik.")
-                return
+                if score >= 70:
+                    print(f"\nRegion '{target_region}' tidak ditemukan.")
+                    print(f"   Menampilkan hasil untuk: {matched} (kemiripan {score:.0f}%)\n")
+                    target_region = matched
+                else:
+                    print(f"\nRegion '{target_region}' tidak tersedia.")
+                    print(f"   Wilayah terdekat: {matched} (kemiripan {score:.0f}%) — terlalu rendah untuk auto-match.")
+                    return
             else:
                 print(f"\n Region '{target_region}' tidak ditemukan.")
                 print(f"   Maksud kamu: {matched}? (kemiripan {score:.0f}%)")

@@ -91,13 +91,16 @@ def cari_wilayah(req: WilayahRequest):
         if action == 'match':
             resolved = matched
         elif action == 'suggest':
-            return {
-                "found":   False,
-                "region":  query,
-                "results": [],
-                "suggestion": matched,
-                "score":   round(score, 1),
-            }
+            if score >= 70:
+                resolved = matched
+            else:
+                return {
+                    "found":      False,
+                    "region":     query,
+                    "results":    [],
+                    "suggestion": matched,
+                    "score":      round(score, 1),
+                }
         else:
             return {"found": False, "region": query, "results": []}
 
