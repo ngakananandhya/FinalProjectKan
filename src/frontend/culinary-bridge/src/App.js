@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import "./App.css";
 
-const API = "http://127.0.0.1:8000";
+const API = "https://culinary-bridge-api.onrender.com";
+// const API = "http://127.0.0.1:8000";
 
 const WELCOME_MESSAGE = {
   id: 1,
@@ -358,14 +359,22 @@ const executeFlow = async (currentFlow, data) => {
         // Cari detail lengkap resep
         const res = await axios.post(`${API}/api/cari/detail`, { query: data.query });
         if (!res.data.found) {
-          addBotMessage({
-            type: "text",
-            text: `Resep "${data.query}" tidak ditemukan.\n\nCoba nama lain atau cek ejaan kamu.`,
-            followup: [
-              { label: "Cari lagi", cmd: "/nama" },
-              { label: "Menu", cmd: "/menu" },
-            ],
-          });
+          if (res.data.suggestions && res.data.suggestions.length > 0) {
+            addBotMessage({
+              type: "text",
+              text: `Resep "${data.query}" tidak ditemukan.\n\nResep yang mungkin relevan:`,
+              list: res.data.suggestions,
+            });
+          } else {
+            addBotMessage({
+              type: "text",
+              text: `Resep "${data.query}" tidak ditemukan.\n\nCoba nama lain atau cek ejaan kamu.`,
+              followup: [
+                { label: "Cari lagi", cmd: "/nama" },
+                { label: "Menu", cmd: "/menu" },
+              ],
+            });
+          }
         } else {
           addBotMessage({
             type: "output",

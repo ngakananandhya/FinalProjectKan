@@ -6,7 +6,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main import recommend_api, baseline, df_final
+from main import recommend_api, baseline, df_final, find_recipe
 from custom_recipe import recommend_custom_api
 from search import search_recipe, json_recipes
 from input_parser import normalize_query, normalize_region
@@ -73,15 +73,41 @@ def cari_nama(req: NamaRequest):
 
 @app.post("/api/cari/wilayah")
 def cari_wilayah(req: WilayahRequest):
-    from input_parser import normalize_query, normalize_region
-    query = normalize_query(req.region).lower()
+    from input_parser import normalize_query, normalize_region, fuzzy_match_region
+    from main import baseline
 
+    query = req.region.strip()
+
+    # Level 1: cek REGION_ALIAS
+    region_normalized = normalize_region(query.lower())
+    if region_normalized:
+        resolved = region_normalized
+    # Level 2: exact match langsung ke baseline
+    elif query.title() in baseline:
+        resolved = query.title()
+    # Level 3: fuzzy match
+    else:
+        matched, score, action = fuzzy_match_region(query, list(baseline.keys()))
+        if action == 'match':
+            resolved = matched
+        elif action == 'suggest':
+            return {
+                "found":   False,
+                "region":  query,
+                "results": [],
+                "suggestion": matched,
+                "score":   round(score, 1),
+            }
+        else:
+            return {"found": False, "region": query, "results": []}
+
+    # Cari resep berdasarkan region yang sudah dinormalisasi
     results = []
     for recipe in json_recipes:
         region = recipe.get("region", "")
         if not region:
             continue
-        if normalize_query(region).lower() == query:
+        if normalize_query(region).lower() == normalize_query(resolved).lower():
             results.append({
                 "title":  recipe["title_original"],
                 "region": recipe.get("region") or "—",
@@ -89,29 +115,41 @@ def cari_wilayah(req: WilayahRequest):
             })
 
     if not results:
-        return {"found": False, "region": req.region, "results": []}
-    return {"found": True, "region": req.region, "results": results}
+        return {"found": False, "region": resolved, "results": []}
+    return {"found": True, "region": resolved, "results": results}
 
 @app.post("/api/cari/detail")
 def cari_detail(req: NamaRequest):
-    results = search_recipe(req.query)
-    if not results:
-        return {"found": False}
-    
     import io
     from contextlib import redirect_stdout
     from search import display_recipe
+
+    # Gunakan find_recipe untuk pencarian yang konsisten
+    search_result = find_recipe(req.query)
+
+    if search_result['status'] == 'not_found':
+        return {
+            "found":       False,
+            "suggestions": search_result.get('suggestions', [])
+        }
+
+    # Ketemu — ambil detail dari JSON
+    recipe_name = search_result['recipe_name']
+    results = search_recipe(recipe_name)
+    if not results:
+        return {"found": False, "suggestions": []}
 
     r = results[0]
     f = io.StringIO()
     with redirect_stdout(f):
         display_recipe(r)
-    
+
     return {
-        "found": True,
-        "output": f.getvalue(),
-        "title": r["title_original"],
-        "region": r.get("region") or "—",
+        "found":        True,
+        "output":       f.getvalue(),
+        "title":        r["title_original"],
+        "region":       r.get("region") or "—",
+        "notification": search_result.get('notification'),
     }
 
 @app.post("/api/adaptasi")

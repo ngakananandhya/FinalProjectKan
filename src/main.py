@@ -833,33 +833,51 @@ def get_relevant_references(scores, adaptations, base_taste, top_n=5):
 
     return result[:top_n]
 
-def recommend(recipe_name, target_region="Jakarta", top_n=5):
-    print("\nCULINARY BRIDGE AI\n")
-
-    # Cari resep
-    query_normalized = normalize_query(recipe_name).upper()
+def find_recipe(query):
+    """
+    Cari resep dengan 3 level: partial match, per kata, suggestions.
+    Return dict:
+    {
+        "status": "found" | "not_found",
+        "idx": int,              # kalau found
+        "recipe_name": str,      # kalau found
+        "suggestions": list,     # kalau not_found
+        "notification": str,     # pesan opsional (fuzzy match, banyak hasil)
+    }
+    """
+    query_normalized = normalize_query(query).upper()
     if 'recipe_name_normalized' not in df_final.columns:
         df_final['recipe_name_normalized'] = df_final['recipe_name'].apply(
             lambda x: normalize_query(x).upper()
         )
 
     # Level 1: partial match query penuh
-    idx = df_final[
-        df_final['recipe_name_normalized'].str.contains(
-            query_normalized, case=False, na=False
-        )
-    ].index
+    words_in_query = query_normalized.split()
+    if len(words_in_query) == 1:
+        # Single word: pakai word boundary agar "AYAM" tidak match "BAYAM"
+        pattern = r'\b' + query_normalized + r'\b'
+        idx = df_final[
+            df_final['recipe_name_normalized'].str.contains(
+                pattern, case=False, na=False, regex=True
+            )
+        ].index
+    else:
+        # Multi-word: substring biasa
+        idx = df_final[
+            df_final['recipe_name_normalized'].str.contains(
+                query_normalized, case=False, na=False
+            )
+        ].index
 
-    # Level 2: partial match per kata (paling spesifik dulu)
+    # Level 2: partial match per kata
     if len(idx) == 0:
         words = [w for w in query_normalized.split() if len(w) >= 3]
         word_freq = {}
         for word in words:
             pattern = r'\b' + word + r'\b'
-            count = df_final['recipe_name_normalized'].str.contains(
+            word_freq[word] = df_final['recipe_name_normalized'].str.contains(
                 pattern, case=False, na=False, regex=True
             ).sum()
-            word_freq[word] = count
 
         words_sorted = sorted(words, key=lambda w: word_freq[w])
         for word in words_sorted:
@@ -873,42 +891,53 @@ def recommend(recipe_name, target_region="Jakarta", top_n=5):
             ].index
             if len(idx) > 0:
                 break
-            
-        
-        # Validasi: cek apakah hasil partial match cukup relevan
-        # (minimal setengah kata query ada di nama resep)
+
+        # Validasi threshold 100%
         if len(idx) > 0:
-            words = [w for w in query_normalized.split() if len(w) >= 3]
-            validated_idx = []
+            validated = []
             for i in idx:
-                recipe_name_norm = df_final.iloc[i]['recipe_name_normalized']
+                norm = df_final.iloc[i]['recipe_name_normalized']
                 matched_words = sum(
                     1 for w in words
-                    if re.search(r'\b' + w + r'\b', recipe_name_norm, re.IGNORECASE)
+                    if re.search(r'\b' + w + r'\b', norm, re.IGNORECASE)
                 )
-                # Minimal 50% kata query harus ada di nama resep
                 if matched_words >= len(words):
-                    validated_idx.append(i)
+                    validated.append(i)
+            idx = pd.Index(validated) if validated else pd.Index([])
 
-            if validated_idx:
-                idx = pd.Index(validated_idx)
-            else:
-                idx = pd.Index([])  # reset, lanjut ke suggestions
+    # Level 3: tidak ketemu → kumpulkan suggestions
+    # Level 3a: fuzzy auto-match (score >= 80)
+    if len(idx) == 0:
+        matched, score, action = fuzzy_match_recipe(
+            query_normalized,
+            df_final['recipe_name_normalized'].tolist()
+        )
+        if action == 'match':
+            # Length ratio check: hindari match query panjang ke nama pendek
+            len_query   = len(query_normalized.replace(" ", ""))
+            len_matched = len(matched.replace(" ", ""))
+            length_ratio = min(len_query, len_matched) / max(len_query, len_matched)
 
-    
-    # Level 3: fuzzy match
-    fuzzy_candidates = []
-        
+            if length_ratio >= 0.6:  # panjang tidak boleh beda lebih dari 40%
+                fuzzy_idx = df_final[
+                    df_final['recipe_name_normalized'] == matched
+                ].index
+                if len(fuzzy_idx) > 0:
+                    return {
+                        "status":       "found",
+                        "idx":          int(fuzzy_idx[0]),
+                        "recipe_name":  df_final.iloc[fuzzy_idx[0]]['recipe_name'],
+                        "notification": f"Menampilkan hasil untuk: {df_final.iloc[fuzzy_idx[0]]['recipe_name']} (kemiripan {score:.0f}%)",
+                    }
 
-    # Kalau semua level gagal → tampilkan suggestions
-    if len(idx) == 0 and not fuzzy_candidates:
-        print(f"\n❌ Resep '{recipe_name}' tidak ditemukan di database.")
-
-        # Kumpulkan suggestions: partial match tiap kata + fuzzy
+    # Level 3b: tidak ketemu → kumpulkan suggestions
+    if len(idx) == 0:
+        suggestion_idxs = []
+        seen = set()
+    if len(idx) == 0:
         suggestion_idxs = []
         seen = set()
 
-        # A: partial match tiap kata
         words = [w for w in query_normalized.split() if len(w) >= 3]
         for word in words:
             partial = df_final[
@@ -921,10 +950,9 @@ def recommend(recipe_name, target_region="Jakarta", top_n=5):
                     seen.add(i)
                     suggestion_idxs.append(i)
 
-        # B: fuzzy top-5
+        from rapidfuzz import process as fuzz_process
         all_names = df_final['recipe_name_normalized'].tolist()
-        from rapidfuzz import process
-        fuzzy_results = process.extract(query_normalized, all_names, limit=5)
+        fuzzy_results = fuzz_process.extract(query_normalized, all_names, limit=5)
         for matched_name, score, _ in fuzzy_results:
             if score >= 50:
                 fidx = df_final[
@@ -935,36 +963,86 @@ def recommend(recipe_name, target_region="Jakarta", top_n=5):
                         seen.add(i)
                         suggestion_idxs.append(i)
 
-        if not suggestion_idxs:
+        suggestions = []
+        for i in suggestion_idxs[:10]:
+            ref = df_final.iloc[i]
+            suggestions.append({
+                "title":  ref['recipe_name'],
+                "region": ref['region'] if pd.notna(ref['region']) else '—',
+                "idx":    i,
+            })
+
+        return {"status": "not_found", "suggestions": suggestions}
+
+    # Terlalu banyak hasil → tampilkan suggestions
+    if len(idx) > 5:
+        suggestions = []
+        for i in idx[:10]:
+            ref = df_final.iloc[i]
+            suggestions.append({
+                "title":  ref['recipe_name'],
+                "region": ref['region'] if pd.notna(ref['region']) else '—',
+                "idx":    i,
+            })
+        return {"status": "not_found", "suggestions": suggestions}
+
+    # hasil → auto-pick pertama + notifikasi
+    notification = None
+    if len(idx) > 1:
+        notification = f"Ditemukan {len(idx)} resep dengan nama mengandung '{query}'. Menampilkan: {df_final.iloc[idx[0]]['recipe_name']}"
+
+    chosen_idx = idx[0]
+    return {
+        "status":       "found",
+        "idx":          int(chosen_idx),
+        "recipe_name":  df_final.iloc[chosen_idx]['recipe_name'],
+        "notification": notification,
+    }
+
+def recommend(recipe_name, target_region="Jakarta", top_n=5, api_mode=False):
+    print("\nCULINARY BRIDGE AI\n")
+
+    # Cari resep
+    query_normalized = normalize_query(recipe_name).upper()
+    if 'recipe_name_normalized' not in df_final.columns:
+        df_final['recipe_name_normalized'] = df_final['recipe_name'].apply(
+            lambda x: normalize_query(x).upper()
+        )
+
+# Cari resep menggunakan find_recipe()
+    search_result = find_recipe(recipe_name)
+
+    if search_result['status'] == 'not_found':
+        print(f"\nResep '{recipe_name}' tidak ditemukan di database.")
+        suggestions = search_result.get('suggestions', [])
+        if suggestions:
+            print(f"\n   Resep yang mungkin relevan:\n")
+            for num, s in enumerate(suggestions, 1):
+                print(f"   {num:2d}. {s['title']:<40} ({s['region']})")
+            if not api_mode:
+                print(f"\n   Ketik nomor untuk lanjut, atau 0 untuk batal:")
+                try:
+                    choice = int(input("   > "))
+                    if choice == 0:
+                        print("Dibatalkan.")
+                        return
+                    if 1 <= choice <= len(suggestions):
+                        idx = pd.Index([suggestions[choice - 1]['idx']])
+                    else:
+                        print("Nomor tidak valid.")
+                        return
+                except ValueError:
+                    print("Input tidak valid.")
+                    return
+            else:
+                return
+        else:
             print(f"   Tidak ada resep yang relevan ditemukan.")
             return
-
-        # Tampilkan daftar suggestions
-        print(f"\n   Resep yang mungkin relevan:\n")
-        # Batasi ke 10 teratas
-        show_idxs = suggestion_idxs[:10]
-        for num, i in enumerate(show_idxs, 1):
-            ref = df_final.iloc[i]
-            region = ref['region'] if pd.notna(ref['region']) else '—'
-            print(f"   {num:2d}. {ref['recipe_name']:<40} ({region})")
-
-        print(f"\n   Ketik nomor untuk lanjut, atau 0 untuk batal:")
-        try:
-            choice = int(input("   > "))
-            if choice == 0:
-                print("Dibatalkan.")
-                return
-            if 1 <= choice <= len(show_idxs):
-                idx = pd.Index([show_idxs[choice - 1]])
-            else:
-                print("Nomor tidak valid.")
-                return
-        except ValueError:
-            print("Input tidak valid.")
-            return
-
-    elif len(idx) == 0 and fuzzy_candidates:
-        idx = pd.Index(fuzzy_candidates)
+    else:
+        idx = pd.Index([search_result['idx']])
+        if search_result['notification']:
+            print(f"\n{search_result['notification']}")
 
      # Notifikasi kalau ada banyak match
     if len(idx) > 1:
@@ -1001,15 +1079,22 @@ def recommend(recipe_name, target_region="Jakarta", top_n=5):
             print(f"   Menampilkan hasil untuk: {matched} (kemiripan {score:.0f}%)\n")
             target_region = matched
         elif action == 'suggest':
-            print(f"\n Region '{target_region}' tidak ditemukan.")
-            print(f"   Maksud kamu: {matched}? (kemiripan {score:.0f}%)")
-            print(f"   Ketik 'ya' untuk lanjut atau 'tidak' untuk batal:")
-            confirm = input("   > ").strip().lower()
-            if confirm in ['ya', 'y', 'yes']:
-                target_region = matched
-            else:
-                print("Dibatalkan.")
+            if api_mode:
+                # API mode: tolak suggest, hanya accept match (≥80%)
+                print(f"\nRegion '{target_region}' tidak tersedia.")
+                print(f"   Wilayah terdekat: {matched} (kemiripan {score:.0f}%) — terlalu rendah untuk auto-match.")
+                print(f"   Gunakan nama wilayah yang lebih spesifik.")
                 return
+            else:
+                print(f"\n Region '{target_region}' tidak ditemukan.")
+                print(f"   Maksud kamu: {matched}? (kemiripan {score:.0f}%)")
+                print(f"   Ketik 'ya' untuk lanjut atau 'tidak' untuk batal:")
+                confirm = input("   > ").strip().lower()
+                if confirm in ['ya', 'y', 'yes']:
+                    target_region = matched
+                else:
+                    print("Dibatalkan.")
+                    return
         else:
             print(f"Region '{target_region}' tidak tersedia.")
             print(f"   Pilihan: {sorted(baseline.keys())}")
@@ -1143,7 +1228,7 @@ def recommend_api(recipe_name, target_region="Jakarta", top_n=5):
     # Capture print output
     f = io.StringIO()
     with redirect_stdout(f):
-        recommend(recipe_name, target_region=target_region, top_n=top_n)
+        recommend(recipe_name, target_region=target_region, top_n=top_n, api_mode=True)
     
     output_text = f.getvalue()
     
@@ -1154,7 +1239,7 @@ def recommend_api(recipe_name, target_region="Jakarta", top_n=5):
 
 if __name__ == "__main__":
     import json
-    result = recommend_api("SAMBAL TERONG GORENG", target_region="Jakarta")
+    result = recommend_api("rendeng", target_region="Jakarta")
     print(result["output"])
 
 
